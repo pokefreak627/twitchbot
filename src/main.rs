@@ -9,24 +9,23 @@ use std::collections::HashMap;
 const CONFIG: &str = include_str!("../bot.txt");
 
 fn main() -> anyhow::Result<()> {
- 
     let user_config = get_user_config()?;
 
     let channels = channels_to_join()?;
 
     let start = std::time::Instant::now();
 
-    let mut bot = Bot::default()
-        .with_command("!hello", |args: Args| {
+    let mut bot: Bot<()> = Bot::default()
+        .with_command("!hello", |args: Args<_>| {
             let output = format!("hello {}!", args.msg.name());
             args.writer.reply(args.msg, &output).unwrap();
         })
-        .with_command("!uptime", move |args: Args| {
+        .with_command("!uptime", move |args: Args<_>| {
             let output = format!("its been running for {:.2?}", start.elapsed());
             // We can send a message back (without quoting the sender) using a writer + our output message
             args.writer.say(args.msg, &output).unwrap();
         })
-        .with_command("!quit", move |args: Args| {
+        .with_command("!quit", move |args: Args<_>| {
             // because we're using sync stuff, turn async into sync with smol!
             smol::block_on(async move {
                 // calling this will cause read_message() to eventually return Status::Quit
@@ -38,34 +37,36 @@ fn main() -> anyhow::Result<()> {
     smol::block_on(async move { bot.run(&user_config, &channels).await })
 }
 
-struct Args<'a, 'b: 'a> {
+struct Args<'a, 'b: 'a, T> {
     msg: &'a Privmsg<'b>,
     writer: &'a mut twitchchat::Writer,
     quit: NotifyHandle,
+    data: &'a T,
 }
 
-trait Command: Send + Sync {
-    fn handle(&mut self, args: Args<'_, '_>);
+trait Command<T>: Send + Sync {
+    fn handle(&mut self, args: Args<'_, '_, T>);
 }
 
-impl<F> Command for F
+impl<F, T> Command<T> for F
 where
-    F: Fn(Args<'_, '_>),
+    F: Fn(Args<'_, '_, T>),
     F: Send + Sync,
 {
-    fn handle(&mut self, args: Args<'_, '_>) {
+    fn handle(&mut self, args: Args<'_, '_, T>) {
         (self)(args)
     }
 }
 
 #[derive(Default)]
-struct Bot {
-    commands: HashMap<String, Box<dyn Command>>,
+struct Bot<T = ()> {
+    commands: HashMap<String, Box<dyn Command<T>>>,
+    data: T,
 }
 
-impl Bot {
+impl<T> Bot<T> {
     // add this command to the bot
-    fn with_command(mut self, name: impl Into<String>, cmd: impl Command + 'static) -> Self {
+    fn with_command(mut self, name: impl Into<String>, cmd: impl Command<T> + 'static) -> Self {
         self.commands.insert(name.into(), Box::new(cmd));
         self
     }
@@ -115,6 +116,7 @@ impl Bot {
                                 msg: &pm,
                                 writer: &mut writer,
                                 quit: quit.clone(),
+                                data: &self.data,
                             };
 
                             command.handle(args);
@@ -140,7 +142,6 @@ impl Bot {
     }
 }
 
-
 pub fn get_user_config() -> anyhow::Result<twitchchat::UserConfig> {
     let mut lines = CONFIG.lines();
     let name = lines.next().unwrap();
@@ -161,7 +162,9 @@ pub fn get_user_config() -> anyhow::Result<twitchchat::UserConfig> {
 
 pub fn channels_to_join() -> anyhow::Result<Vec<String>> {
     let mut lines = CONFIG.lines().skip(2);
-    let channels = lines.next().unwrap()
+    let channels = lines
+        .next()
+        .unwrap()
         .split(',')
         .map(ToString::to_string)
         .collect();
